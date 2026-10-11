@@ -93,7 +93,8 @@ browser refuses to call a plain HTTP address from an HTTPS page.
 - Taking a queue over from the server switches Feishin's shuffle off, because the
   server's order is the real one.
 - Switching shuffle on while a song plays replaces the queue on the device. There is a
-  gap of about a second, and the song that was playing starts again from the beginning.
+  gap of a second or two, then the song continues where it was (bridge 0.2.1 or newer;
+  older bridges restart the song from the beginning).
 - Repeat modes are not sent to the server.
 - Clicking the track that is already playing does nothing. Seek to the start instead.
 - Portrait phone screens are not usable; that is upstream's layout. The bridge serves
