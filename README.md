@@ -87,6 +87,10 @@ browser refuses to call a plain HTTP address from an HTTPS page.
 
 `GET /healthz` answers `ok` and is not written to the access log.
 
+For Kubernetes, the bridge's repository has manifests that deploy this image together
+with the bridge:
+[navidrome-wiim-bridge/deploy/kubernetes](https://github.com/m8-t/navidrome-wiim-bridge/tree/main/deploy/kubernetes).
+
 ## Limits
 
 - Web build only. The desktop app is not patched.
