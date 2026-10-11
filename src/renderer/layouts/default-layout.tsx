@@ -11,11 +11,15 @@ import { useSettingsStore, useWindowBarStyle } from '/@/renderer/store/settings.
 import { Platform, PlayerType } from '/@/shared/types/types';
 
 if (!isElectron()) {
-    useSettingsStore.getState().actions.setSettings({
-        playback: {
-            type: PlayerType.WEB,
-        },
-    });
+    const { actions, playback } = useSettingsStore.getState();
+
+    if (playback.type === PlayerType.LOCAL || playback.type === PlayerType.DLNA) {
+        actions.setSettings({
+            playback: {
+                type: PlayerType.WEB,
+            },
+        });
+    }
 }
 
 interface DefaultLayoutProps {
