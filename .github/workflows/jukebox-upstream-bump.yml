@@ -1,0 +1,131 @@
+name: Bump Jukebox Upstream Base Version
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+  packages: read
+
+jobs:
+  check-and-bump:
+    name: Check for upstream updates and bump if newer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: jukebox-bridge
+
+      - name: Fetch latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_STABLE=$(gh release list \
+            --repo jeffvli/feishin \
+            --limit 100 \
+            --json tagName,isPrerelease,isDraft \
+            --jq '.[] | select(.isPrerelease == false and .isDraft == false) | .tagName' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sed 's/^v//' \
+            | sort -V | tail -1)
+
+          if [ -z "$LATEST_STABLE" ]; then
+            echo "ERROR: Could not determine latest stable upstream version"
+            exit 1
+          fi
+
+          echo "Latest stable upstream version: $LATEST_STABLE"
+          echo "latest_version=${LATEST_STABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Determine current base version
+        id: current
+        run: |
+          CURRENT=$(grep "^ARG BASE_VERSION=" docker/jukebox.Dockerfile | sed 's/.*=//; s/"//g')
+          if [ -z "$CURRENT" ]; then
+            echo "ERROR: could not read ARG BASE_VERSION from docker/jukebox.Dockerfile"
+            exit 1
+          fi
+          echo "Current base version: $CURRENT"
+          echo "current_version=${CURRENT}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to container registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Compare versions and decide
+        id: compare
+        env:
+          CURRENT: ${{ steps.current.outputs.current_version }}
+          LATEST: ${{ steps.upstream.outputs.latest_version }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          newest=$(printf '%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)
+
+          needs_update=false
+          target="$CURRENT"
+          if [ "$newest" = "$LATEST" ] && [ "$CURRENT" != "$LATEST" ]; then
+            echo "Newer version available: $CURRENT -> $LATEST"
+            needs_update=true
+            target="$LATEST"
+            echo "new_version=${LATEST}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Already on latest stable version ($CURRENT)"
+          fi
+          echo "needs_update=${needs_update}" >> "$GITHUB_OUTPUT"
+
+          image_exists=true
+          if ! docker manifest inspect "ghcr.io/${OWNER}/feishin-jukebox:${target}-jukebox" >/dev/null 2>&1; then
+            image_exists=false
+          fi
+
+          # A committed bump whose build failed would otherwise look up to date forever
+          if [ "$needs_update" = "true" ] || [ "$image_exists" = "false" ]; then
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+            if [ "$needs_update" = "true" ]; then
+              echo "Decision: bumping to ${target}"
+            else
+              echo "Decision: self-healing missing image for ${target}"
+            fi
+          else
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+            echo "Decision: idle (already on latest, image exists)"
+          fi
+
+      - name: Update version reference
+        if: steps.compare.outputs.needs_update == 'true'
+        env:
+          NEW_VERSION: ${{ steps.compare.outputs.new_version }}
+        run: |
+          sed -i "s/^ARG BASE_VERSION=.*/ARG BASE_VERSION=${NEW_VERSION}/" docker/jukebox.Dockerfile
+          echo "Updated Dockerfile to base version ${NEW_VERSION}"
+
+      - name: Commit and push bump
+        if: steps.compare.outputs.needs_update == 'true'
+        env:
+          NEW_VERSION: ${{ steps.compare.outputs.new_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add docker/jukebox.Dockerfile
+          git commit -m "ci: bump upstream base to ${NEW_VERSION}"
+          git push origin HEAD:jukebox-bridge
+
+          echo "Pushed version bump commit"
+
+      - name: Trigger image build
+        if: steps.compare.outputs.needs_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh workflow run jukebox-image.yml --repo "$REPO" --ref jukebox-bridge
+          echo "Triggered build workflow; it reads the version from the Dockerfile"
