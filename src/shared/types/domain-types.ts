@@ -1863,6 +1863,7 @@ export type JukeboxControlAction =
     | 'remove'
     | 'set'
     | 'setGain'
+    | 'setMute'
     | 'shuffle'
     | 'skip'
     | 'start'
@@ -1876,6 +1877,7 @@ export type JukeboxControlQuery = {
     gain?: number;
     id?: string | string[];
     index?: number;
+    mute?: boolean;
     offset?: number;
 };
 
@@ -1893,12 +1895,14 @@ export type JukeboxControlResponse = null | {
             title: string;
         }>;
         gain: number;
+        muted?: boolean;
         playing: boolean;
         position?: number;
     };
     jukeboxStatus?: {
         currentIndex?: number;
         gain: number;
+        muted?: boolean;
         playing: boolean;
         position?: number;
     };

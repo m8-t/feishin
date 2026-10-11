@@ -27,6 +27,7 @@ import { PlayerStatus } from '/@/shared/types/types';
 
 export interface JukeboxPlayerEngineHandle extends AudioPlayer {
     queueChanged(): void;
+    setMuted(muted: boolean): void;
     trackChanged(): void;
 }
 
@@ -34,6 +35,7 @@ export type JukeboxServerUpdate = {
     changes: ServerStateChanges;
     gain: number;
     index: number;
+    muted?: boolean;
     playing: boolean;
     position: null | number;
 };
@@ -89,6 +91,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             gain?: number;
             id?: string | string[];
             index?: number;
+            mute?: boolean;
             offset?: number;
         } = {},
     ): Promise<JukeboxControlResponse> => {
@@ -118,6 +121,15 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
     const chainRef = useRef<Promise<void>>(Promise.resolve());
     const syncTimerRef = useRef<null | ReturnType<typeof setTimeout>>(null);
     const tickBusyRef = useRef(false);
+    // Decided by the first reply of a session: servers without the extension never get setMute.
+    const muteSupportRef = useRef<'absent' | 'present' | 'unknown'>('unknown');
+
+    const noteMuteSupport = (muted: boolean | undefined) => {
+        if (muteSupportRef.current === 'unknown') {
+            muteSupportRef.current = typeof muted === 'boolean' ? 'present' : 'absent';
+            logger.info('Jukebox mute support', { support: muteSupportRef.current });
+        }
+    };
 
     // Commands run strictly one after another so a poll never reads a half-applied queue.
     const enqueue = (job: () => Promise<void>): Promise<void> => {
@@ -149,12 +161,14 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
                 gain: call.gain,
                 ids: call.ids?.length ?? 0,
                 index: call.index,
+                mute: call.mute,
                 offset: call.offset,
             });
             const res = await callApiRef.current(call.action, {
                 gain: call.gain,
                 id: call.ids,
                 index: call.index,
+                mute: call.mute,
                 offset: call.offset,
             });
 
@@ -256,6 +270,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         }
 
         const playlist = res.jukeboxPlaylist;
+        noteMuteSupport(playlist?.muted);
         const serverIds = playlist?.entry?.map((entry) => entry.id) ?? [];
         const snapshot = readSnapshot();
 
@@ -271,19 +286,26 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             const seen: JukeboxSeenState = {
                 gain: playlist.gain,
                 index: playlist.currentIndex ?? 0,
+                muted: playlist.muted,
                 playing: playlist.playing,
             };
             lastPushedRef.current = null;
             lastSeenRef.current = seen;
             onServerUpdateRef.current({
                 ...seen,
-                changes: { gain: true, index: false, playing: false },
+                changes: {
+                    gain: true,
+                    index: false,
+                    muted: seen.muted !== undefined,
+                    playing: false,
+                },
                 position: null,
             });
         } else if (decision === 'adopt' && playlist) {
             const seen: JukeboxSeenState = {
                 gain: playlist.gain,
                 index: playlist.currentIndex ?? 0,
+                muted: playlist.muted,
                 playing: playlist.playing,
             };
             lastPushedRef.current = serverIds;
@@ -315,6 +337,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
                 const seen: JukeboxSeenState = {
                     gain: gain ?? 0,
                     index: snapshot.currentServerIndex ?? 0,
+                    muted: playlist?.muted,
                     playing: false,
                 };
                 lastSeenRef.current = gain === undefined ? null : seen;
@@ -324,10 +347,12 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
                         changes: {
                             gain: true,
                             index: false,
+                            muted: seen.muted !== undefined,
                             playing: snapshot.status === PlayerStatus.PLAYING,
                         },
                         gain,
                         index: seen.index,
+                        muted: seen.muted,
                         playing: false,
                         position: null,
                     });
@@ -365,9 +390,12 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             scheduleQueueSync();
         }
 
+        noteMuteSupport(playlist.muted);
+
         const incoming: JukeboxSeenState = {
             gain: playlist.gain,
             index: playlist.currentIndex ?? 0,
+            muted: playlist.muted,
             playing: playlist.playing,
         };
         const changes = diffServerState(lastSeenRef.current, incoming);
@@ -375,6 +403,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         lastSeenRef.current = {
             ...incoming,
             gain: changes.gain || !lastSeenRef.current ? incoming.gain : lastSeenRef.current.gain,
+            muted: incoming.muted ?? lastSeenRef.current?.muted,
         };
 
         onServerUpdateRef.current({ ...incoming, changes, position: playlist.position ?? null });
@@ -408,6 +437,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         readyRef.current = false;
         lastSeenRef.current = null;
         lastPushedRef.current = null;
+        muteSupportRef.current = 'unknown';
 
         if (syncTimerRef.current) {
             clearTimeout(syncTimerRef.current);
@@ -482,6 +512,17 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             command(
                 () => [{ action: 'skip', index, offset: Math.max(0, Math.floor(seconds)) }],
                 () => patchLastSeen({ index }),
+            );
+        },
+        setMuted(muted: boolean) {
+            if (muteSupportRef.current !== 'present') {
+                logger.debug('Jukebox mute not forwarded: server has no mute support');
+                return;
+            }
+
+            command(
+                () => [{ action: 'setMute', mute: muted }],
+                () => patchLastSeen({ muted }),
             );
         },
         setVolume(vol: number) {

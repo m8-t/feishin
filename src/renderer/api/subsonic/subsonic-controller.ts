@@ -2162,6 +2162,7 @@ export const SubsonicController: InternalControllerEndpoint = {
                 gain: query.gain,
                 id: query.id,
                 index: query.index,
+                mute: query.mute,
                 offset: query.offset,
             },
         });

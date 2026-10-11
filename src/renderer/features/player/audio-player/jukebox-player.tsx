@@ -26,7 +26,8 @@ export function JukeboxPlayer() {
     const playerRef = useRef<JukeboxPlayerEngineHandle>(null);
     const applyingRemoteRef = useRef(false);
     const lastStatusEventAtRef = useRef<null | number>(null);
-    const { mediaPause, mediaPlay, mediaPlayByIndex, setTimestamp, setVolume } = usePlayerActions();
+    const { mediaPause, mediaPlay, mediaPlayByIndex, mediaToggleMute, setTimestamp, setVolume } =
+        usePlayerActions();
     const player = usePlayer();
     const playerHydrated = usePlayerHydrated();
 
@@ -47,8 +48,12 @@ export function JukeboxPlayer() {
             applyingRemoteRef.current = true;
 
             try {
-                const { changes, gain, index, playing, position } = update;
+                const { changes, gain, index, muted, playing, position } = update;
                 const state = usePlayerStoreBase.getState();
+
+                if (changes.muted && muted !== undefined && state.player.muted !== muted) {
+                    mediaToggleMute();
+                }
 
                 // With no local queue there is no track to show, so only the volume is mirrored.
                 if (state.getQueueOrder().items.length === 0) {
@@ -93,7 +98,7 @@ export function JukeboxPlayer() {
                 applyingRemoteRef.current = false;
             }
         },
-        [mediaPause, mediaPlay, mediaPlayByIndex, setTimestamp, setVolume],
+        [mediaPause, mediaPlay, mediaPlayByIndex, mediaToggleMute, setTimestamp, setVolume],
     );
 
     const debouncedSeekToTimestamp = useDebouncedCallback((timestamp: number) => {
@@ -112,6 +117,13 @@ export function JukeboxPlayer() {
                 }
 
                 playerRef.current?.trackChanged();
+            },
+            onPlayerMute: (properties) => {
+                if (applyingRemoteRef.current) {
+                    return;
+                }
+
+                playerRef.current?.setMuted(properties.muted);
             },
             onPlayerQueueChange: () => {
                 playerRef.current?.queueChanged();

@@ -151,13 +151,19 @@ describe('diffServerState', () => {
     const seen = { gain: 0.5, index: 2, playing: true };
 
     it('reports everything changed without a previous state', () => {
-        assert.deepEqual(diffServerState(null, seen), { gain: true, index: true, playing: true });
+        assert.deepEqual(diffServerState(null, seen), {
+            gain: true,
+            index: true,
+            muted: false,
+            playing: true,
+        });
     });
 
     it('reports no change for an identical state', () => {
         assert.deepEqual(diffServerState(seen, { ...seen }), {
             gain: false,
             index: false,
+            muted: false,
             playing: false,
         });
     });
@@ -173,15 +179,30 @@ describe('diffServerState', () => {
         assert.equal(diffServerState(seen, { ...seen, gain: 0.3 }).gain, true);
     });
 
+    it('reports muted for a first reply that carries it', () => {
+        assert.equal(diffServerState(null, { ...seen, muted: false }).muted, true);
+    });
+
+    it('detects a muted change and ignores an unchanged or absent value', () => {
+        const muted = { ...seen, muted: true };
+        assert.equal(diffServerState(muted, { ...muted }).muted, false);
+        assert.equal(diffServerState(muted, { ...muted, muted: false }).muted, true);
+        assert.equal(diffServerState(seen, { ...seen, muted: true }).muted, true);
+        assert.equal(diffServerState(muted, { ...seen }).muted, false);
+        assert.equal(diffServerState(seen, { ...seen }).muted, false);
+    });
+
     it('detects index and playing changes independently', () => {
         assert.deepEqual(diffServerState(seen, { ...seen, index: 3 }), {
             gain: false,
             index: true,
+            muted: false,
             playing: false,
         });
         assert.deepEqual(diffServerState(seen, { ...seen, playing: false }), {
             gain: false,
             index: false,
+            muted: false,
             playing: true,
         });
     });

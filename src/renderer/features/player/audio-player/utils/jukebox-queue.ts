@@ -108,16 +108,18 @@ export const GAIN_EPSILON = 0.01;
 export const SEEK_ECHO_WINDOW_MS = 400;
 
 export type JukeboxCall = {
-    action: 'add' | 'clear' | 'remove' | 'set' | 'setGain' | 'skip' | 'start' | 'stop';
+    action: 'add' | 'clear' | 'remove' | 'set' | 'setGain' | 'setMute' | 'skip' | 'start' | 'stop';
     gain?: number;
     ids?: string[];
     index?: number;
+    mute?: boolean;
     offset?: number;
 };
 
 export type JukeboxSeenState = {
     gain: number;
     index: number;
+    muted?: boolean;
     playing: boolean;
 };
 
@@ -131,6 +133,7 @@ export type PlanCallsContext = {
 export type ServerStateChanges = {
     gain: boolean;
     index: boolean;
+    muted: boolean;
     playing: boolean;
 };
 
@@ -152,12 +155,13 @@ export function diffServerState(
     incoming: JukeboxSeenState,
 ): ServerStateChanges {
     if (!lastSeen) {
-        return { gain: true, index: true, playing: true };
+        return { gain: true, index: true, muted: incoming.muted !== undefined, playing: true };
     }
 
     return {
         gain: Math.abs(incoming.gain - lastSeen.gain) >= GAIN_EPSILON - 1e-9,
         index: incoming.index !== lastSeen.index,
+        muted: incoming.muted !== undefined && incoming.muted !== lastSeen.muted,
         playing: incoming.playing !== lastSeen.playing,
     };
 }

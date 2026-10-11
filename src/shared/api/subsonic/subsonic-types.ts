@@ -872,10 +872,12 @@ const jukeboxControlParameters = z.object({
         'remove',
         'shuffle',
         'status',
+        'setMute',
     ]),
     gain: z.number().optional(),
     id: z.union([z.string(), z.array(z.string())]).optional(),
     index: z.number().optional(),
+    mute: z.boolean().optional(),
     offset: z.number().optional(),
 });
 
@@ -893,6 +895,7 @@ const jukeboxPlaylistEntry = z.object({
 const jukeboxStatus = z.object({
     currentIndex: z.number().optional(),
     gain: z.number(),
+    muted: z.boolean().optional(),
     playing: z.boolean(),
     position: z.number().optional(),
 });
