@@ -3,9 +3,13 @@ import { describe, it } from 'node:test';
 
 import {
     chunkIds,
+    decideStartup,
+    diffServerState,
     planQueueSync,
+    planToCalls,
     playOrderIds,
     queueIndexToServerIndex,
+    resolveQueueSync,
     serverIndexToQueueIndex,
 } from './jukebox-queue.ts';
 
@@ -139,5 +143,172 @@ describe('planQueueSync', () => {
 
     it('replaces with an empty list when emptied', () => {
         assert.deepEqual(planQueueSync(['a', 'b'], []), { ids: [], type: 'replace' });
+    });
+});
+
+describe('diffServerState', () => {
+    const seen = { gain: 0.5, index: 2, playing: true };
+
+    it('reports everything changed without a previous state', () => {
+        assert.deepEqual(diffServerState(null, seen), { gain: true, index: true, playing: true });
+    });
+
+    it('reports no change for an identical state', () => {
+        assert.deepEqual(diffServerState(seen, { ...seen }), {
+            gain: false,
+            index: false,
+            playing: false,
+        });
+    });
+
+    it('ignores a gain difference below 0.01', () => {
+        assert.equal(diffServerState(seen, { ...seen, gain: 0.505 }).gain, false);
+        assert.equal(diffServerState(seen, { ...seen, gain: 0.495 }).gain, false);
+    });
+
+    it('detects a gain difference of 0.01 or more', () => {
+        assert.equal(diffServerState(seen, { ...seen, gain: 0.51 }).gain, true);
+        assert.equal(diffServerState({ ...seen, gain: 0.2 }, { ...seen, gain: 0.21 }).gain, true);
+        assert.equal(diffServerState(seen, { ...seen, gain: 0.3 }).gain, true);
+    });
+
+    it('detects index and playing changes independently', () => {
+        assert.deepEqual(diffServerState(seen, { ...seen, index: 3 }), {
+            gain: false,
+            index: true,
+            playing: false,
+        });
+        assert.deepEqual(diffServerState(seen, { ...seen, playing: false }), {
+            gain: false,
+            index: false,
+            playing: true,
+        });
+    });
+});
+
+describe('decideStartup', () => {
+    it('adopts when the ids match', () => {
+        assert.equal(decideStartup(['a', 'b'], ['a', 'b']), 'adopt');
+        assert.equal(decideStartup([], []), 'adopt');
+    });
+
+    it('pushes when the ids differ', () => {
+        assert.equal(decideStartup(['a', 'b'], ['b', 'a']), 'push');
+        assert.equal(decideStartup(['a'], ['a', 'b']), 'push');
+        assert.equal(decideStartup(['a', 'b'], ['a']), 'push');
+    });
+
+    it('pushes when the server is empty and the local queue is not', () => {
+        assert.equal(decideStartup([], ['a']), 'push');
+    });
+
+    it('stays idle when the local queue is empty and the server is not', () => {
+        assert.equal(decideStartup(['a', 'b'], []), 'idle');
+    });
+
+    it('adopts when both are empty', () => {
+        assert.equal(decideStartup([], []), 'adopt');
+    });
+});
+
+describe('planToCalls', () => {
+    const ctx = {
+        currentServerIndex: 3,
+        hadPushedIds: true,
+        positionSeconds: 42.9,
+        shouldStart: false,
+    };
+
+    it('maps none to no calls', () => {
+        assert.deepEqual(planToCalls({ type: 'none' }, ctx), []);
+    });
+
+    it('maps append to chunked add calls', () => {
+        const ids = make(120);
+        const calls = planToCalls({ ids, type: 'append' }, ctx);
+        assert.deepEqual(
+            calls.map((c) => [c.action, c.ids?.length]),
+            [
+                ['add', 50],
+                ['add', 50],
+                ['add', 20],
+            ],
+        );
+    });
+
+    it('maps remove to a remove call', () => {
+        assert.deepEqual(planToCalls({ index: 4, type: 'remove' }, ctx), [
+            { action: 'remove', index: 4 },
+        ]);
+    });
+
+    it('maps a 120 id replace to set, add, add, skip', () => {
+        const ids = make(120);
+        const calls = planToCalls({ ids, type: 'replace' }, ctx);
+        assert.deepEqual(
+            calls.map((c) => c.action),
+            ['set', 'add', 'add', 'skip'],
+        );
+        assert.deepEqual(
+            calls.slice(0, 3).map((c) => c.ids?.length),
+            [50, 50, 20],
+        );
+        assert.deepEqual(calls[3], { action: 'skip', index: 3, offset: 42 });
+        assert.deepEqual(
+            calls.slice(0, 3).flatMap((c) => c.ids ?? []),
+            ids,
+        );
+    });
+
+    it('adds start to a replace only when playing', () => {
+        const ids = make(3);
+        const playing = planToCalls({ ids, type: 'replace' }, { ...ctx, shouldStart: true });
+        assert.equal(playing.at(-1)?.action, 'start');
+        const paused = planToCalls({ ids, type: 'replace' }, ctx);
+        assert.equal(paused.at(-1)?.action, 'skip');
+    });
+
+    it('omits skip when there is no current track', () => {
+        const calls = planToCalls(
+            { ids: ['a'], type: 'replace' },
+            { ...ctx, currentServerIndex: null },
+        );
+        assert.deepEqual(
+            calls.map((c) => c.action),
+            ['set'],
+        );
+    });
+
+    it('maps an empty replace to clear only when ids were pushed before', () => {
+        assert.deepEqual(planToCalls({ ids: [], type: 'replace' }, ctx), [{ action: 'clear' }]);
+        assert.deepEqual(
+            planToCalls({ ids: [], type: 'replace' }, { ...ctx, hadPushedIds: false }),
+            [],
+        );
+    });
+});
+
+describe('resolveQueueSync', () => {
+    it('keeps a remove of a non-current index', () => {
+        assert.deepEqual(resolveQueueSync(['a', 'b', 'c'], ['a', 'c'], 0), {
+            index: 1,
+            type: 'remove',
+        });
+    });
+
+    it('turns a remove of the current index into a replace', () => {
+        assert.deepEqual(resolveQueueSync(['a', 'b', 'c'], ['a', 'c'], 1), {
+            ids: ['a', 'c'],
+            type: 'replace',
+        });
+    });
+
+    it('passes other plans through', () => {
+        assert.deepEqual(resolveQueueSync(['a'], ['a', 'b'], 0), { ids: ['b'], type: 'append' });
+        assert.deepEqual(resolveQueueSync(['a'], ['a'], null), { type: 'none' });
+        assert.deepEqual(resolveQueueSync(['a', 'b'], ['b', 'a'], null), {
+            ids: ['b', 'a'],
+            type: 'replace',
+        });
     });
 });

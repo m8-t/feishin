@@ -103,3 +103,110 @@ export function serverIndexToQueueIndex(
 
     return shuffled[serverIndex];
 }
+
+export const GAIN_EPSILON = 0.01;
+
+export type JukeboxCall = {
+    action: 'add' | 'clear' | 'remove' | 'set' | 'setGain' | 'skip' | 'start' | 'stop';
+    gain?: number;
+    ids?: string[];
+    index?: number;
+    offset?: number;
+};
+
+export type JukeboxSeenState = {
+    gain: number;
+    index: number;
+    playing: boolean;
+};
+
+export type PlanCallsContext = {
+    currentServerIndex: null | number;
+    hadPushedIds: boolean;
+    positionSeconds: number;
+    shouldStart: boolean;
+};
+
+export type ServerStateChanges = {
+    gain: boolean;
+    index: boolean;
+    playing: boolean;
+};
+
+export function decideStartup(
+    serverIds: readonly string[],
+    localIds: readonly string[],
+): 'adopt' | 'idle' | 'push' {
+    if (localIds.length === 0 && serverIds.length > 0) {
+        return 'idle';
+    }
+
+    const equal =
+        serverIds.length === localIds.length && serverIds.every((id, i) => id === localIds[i]);
+    return equal ? 'adopt' : 'push';
+}
+
+export function diffServerState(
+    lastSeen: JukeboxSeenState | null,
+    incoming: JukeboxSeenState,
+): ServerStateChanges {
+    if (!lastSeen) {
+        return { gain: true, index: true, playing: true };
+    }
+
+    return {
+        gain: Math.abs(incoming.gain - lastSeen.gain) >= GAIN_EPSILON - 1e-9,
+        index: incoming.index !== lastSeen.index,
+        playing: incoming.playing !== lastSeen.playing,
+    };
+}
+
+export function planToCalls(plan: QueueSyncPlan, context: PlanCallsContext): JukeboxCall[] {
+    switch (plan.type) {
+        case 'append':
+            return chunkIds(plan.ids).map((ids) => ({ action: 'add', ids }));
+        case 'none':
+            return [];
+        case 'remove':
+            return [{ action: 'remove', index: plan.index }];
+        case 'replace': {
+            if (plan.ids.length === 0) {
+                return context.hadPushedIds ? [{ action: 'clear' }] : [];
+            }
+
+            const [first, ...rest] = chunkIds(plan.ids);
+            const calls: JukeboxCall[] = [{ action: 'set', ids: first }];
+            for (const ids of rest) {
+                calls.push({ action: 'add', ids });
+            }
+
+            if (context.currentServerIndex !== null) {
+                calls.push({
+                    action: 'skip',
+                    index: context.currentServerIndex,
+                    offset: Math.max(0, Math.floor(context.positionSeconds)),
+                });
+            }
+
+            if (context.shouldStart) {
+                calls.push({ action: 'start' });
+            }
+
+            return calls;
+        }
+    }
+}
+
+export function resolveQueueSync(
+    previous: null | readonly string[],
+    next: readonly string[],
+    serverCurrentIndex: null | number,
+): QueueSyncPlan {
+    const plan = planQueueSync(previous, next);
+
+    if (plan.type === 'remove' && plan.index === serverCurrentIndex) {
+        return { ids: [...next], type: 'replace' };
+    }
+
+    return plan;
+}

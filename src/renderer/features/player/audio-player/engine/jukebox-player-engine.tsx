@@ -1,418 +1,493 @@
 import type { RefObject } from 'react';
 
-import { useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { useEffect, useImperativeHandle, useRef } from 'react';
 
 import { useJukeboxControl } from '/@/renderer/features/player/audio-player/hooks/use-jukebox-control';
 import { AudioPlayer } from '/@/renderer/features/player/audio-player/types';
 import {
-    JukeboxControlAction,
-    JukeboxControlQuery,
-    JukeboxControlResponse,
-    PlayerData,
-} from '/@/shared/types/domain-types';
+    decideStartup,
+    diffServerState,
+    JukeboxCall,
+    JukeboxSeenState,
+    planToCalls,
+    playOrderIds,
+    queueIndexToServerIndex,
+    resolveQueueSync,
+    ServerStateChanges,
+} from '/@/renderer/features/player/audio-player/utils/jukebox-queue';
+import {
+    isShuffleEnabled,
+    mapShuffledToQueueIndex,
+    useTimestampStoreBase,
+} from '/@/renderer/store';
+import { usePlayerStoreBase } from '/@/renderer/store/player.store';
+import { logger } from '/@/renderer/utils/logger';
+import { JukeboxControlAction, JukeboxControlResponse } from '/@/shared/types/domain-types';
 import { PlayerStatus } from '/@/shared/types/types';
 
-export interface JukeboxPlayerEngineHandle extends AudioPlayer {}
-
-export type JukeboxServerState = {
-    gain: number;
-    nextTrackId: null | string;
-    playing: boolean;
-    position: number;
-    trackId: null | string;
-};
-
-type JukeboxCallApi = (
-    action: JukeboxControlAction,
-    queryParams?: Omit<JukeboxControlQuery, 'action'>,
-) => Promise<JukeboxControlResponse>;
-
-interface JukeboxPlayerEngineProps {
-    currentTrackId: null | string;
-    enabled: boolean;
-    isMuted: boolean;
-    nextTrackId: null | string;
-    onEnded: () => PlayerData;
-    onServerStateSynced?: (state: JukeboxServerState) => void;
-    onTick: (positionSeconds: number) => void;
-    playerRef: RefObject<JukeboxPlayerEngineHandle | null>;
-    playerStatus: PlayerStatus;
-    serverId: string;
-    volume: number;
+export interface JukeboxPlayerEngineHandle extends AudioPlayer {
+    queueChanged(): void;
+    trackChanged(): void;
 }
 
-type JukeboxQueueRefs = {
-    lastCurrentTrackIdRef: RefObject<null | string>;
-    lastNextTrackIdRef: RefObject<null | string>;
-    lastServerIndexRef: RefObject<number>;
+export type JukeboxServerUpdate = {
+    changes: ServerStateChanges;
+    gain: number;
+    index: number;
+    playing: boolean;
+    position: null | number;
 };
 
-const TRACK_SETUP_DELAY_MS = 300;
+interface JukeboxPlayerEngineProps {
+    enabled: boolean;
+    onServerUpdate: (update: JukeboxServerUpdate) => void;
+    playerRef: RefObject<JukeboxPlayerEngineHandle | null>;
+    serverId: string;
+}
 
-const buildQueueIds = (currentId: string, nextId?: null | string): string | string[] => {
-    if (nextId) {
-        return [currentId, nextId];
-    }
-
-    return currentId;
+type Snapshot = {
+    currentServerIndex: null | number;
+    orderIds: string[];
+    status: PlayerStatus;
+    timestamp: number;
 };
 
-const getPlaylistTrackIds = (
-    playlist: NonNullable<JukeboxControlResponse>['jukeboxPlaylist'],
-): { currentTrackId: null | string; nextTrackId: null | string } => {
-    if (!playlist?.entry?.length) {
-        return { currentTrackId: null, nextTrackId: null };
-    }
+const POLL_INTERVAL_MS = 1000;
+const QUEUE_SYNC_DEBOUNCE_MS = 500;
+const COMMAND_HOLD_MS = 300;
 
-    const currentIndex = playlist.currentIndex ?? 0;
-    const currentTrackId = playlist.entry[currentIndex]?.id ?? null;
-    const nextTrackId = playlist.entry[currentIndex + 1]?.id ?? null;
+const readSnapshot = (): Snapshot => {
+    const state = usePlayerStoreBase.getState();
+    const items = state.getQueueOrder().items;
+    const shuffled = isShuffleEnabled(state) ? state.queue.shuffled : null;
+    const orderIds = playOrderIds(
+        items.map((item) => item.id),
+        shuffled,
+    );
 
-    return { currentTrackId, nextTrackId };
-};
+    const queueIndex = shuffled
+        ? mapShuffledToQueueIndex(state.player.index, shuffled)
+        : state.player.index;
+    const hasCurrent = queueIndex >= 0 && queueIndex < items.length;
 
-const replaceJukeboxQueue = async (
-    callApi: JukeboxCallApi,
-    refs: JukeboxQueueRefs,
-    currentId: null | string,
-    nextId: null | string,
-    shouldStart: boolean,
-) => {
-    if (!currentId) {
-        await callApi('clear');
-        refs.lastCurrentTrackIdRef.current = null;
-        refs.lastNextTrackIdRef.current = null;
-        refs.lastServerIndexRef.current = -1;
-        return;
-    }
-
-    await callApi('set', { id: buildQueueIds(currentId, nextId) });
-    await callApi('skip', { index: 0, offset: 0 });
-
-    if (shouldStart) {
-        await callApi('start');
-    }
-
-    refs.lastCurrentTrackIdRef.current = currentId;
-    refs.lastNextTrackIdRef.current = nextId;
-    refs.lastServerIndexRef.current = 0;
-};
-
-const setJukeboxQueueNext = async (
-    callApi: JukeboxCallApi,
-    refs: JukeboxQueueRefs,
-    nextId: null | string,
-) => {
-    const res = await callApi('get');
-    const entryCount = res?.jukeboxPlaylist?.entry?.length ?? 0;
-
-    if (entryCount > 1) {
-        await callApi('remove', { index: 1 });
-    }
-
-    if (nextId) {
-        await callApi('add', { id: nextId });
-    }
-
-    refs.lastNextTrackIdRef.current = nextId;
-};
-
-const handleJukeboxAutoNext = async (
-    callApi: JukeboxCallApi,
-    refs: JukeboxQueueRefs,
-    playerData: PlayerData,
-) => {
-    await callApi('remove', { index: 0 });
-
-    const newNextId = playerData.nextSong?.id ?? null;
-    if (newNextId) {
-        await callApi('add', { id: newNextId });
-    }
-
-    refs.lastCurrentTrackIdRef.current = playerData.currentSong?.id ?? null;
-    refs.lastNextTrackIdRef.current = newNextId;
-    refs.lastServerIndexRef.current = 0;
+    return {
+        currentServerIndex: hasCurrent ? queueIndexToServerIndex(queueIndex, shuffled) : null,
+        orderIds,
+        status: state.player.status,
+        timestamp: useTimestampStoreBase.getState().timestamp,
+    };
 };
 
 export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
-    const {
-        currentTrackId,
-        enabled,
-        isMuted,
-        nextTrackId,
-        onEnded,
-        onServerStateSynced,
-        onTick,
-        playerRef,
-        playerStatus,
-        serverId,
-        volume,
-    } = props;
-
-    const pollRef = useRef<NodeJS.Timeout | null>(null);
-    const lastPositionRef = useRef<number>(-1);
-    const lastCurrentTrackIdRef = useRef<null | string>(null);
-    const lastNextTrackIdRef = useRef<null | string>(null);
-    const lastServerIndexRef = useRef<number>(-1);
-    const isChangingTrackRef = useRef<boolean>(false);
-    const serverPlayingRef = useRef<boolean>(false);
-    const queueRefs: JukeboxQueueRefs = {
-        lastCurrentTrackIdRef,
-        lastNextTrackIdRef,
-        lastServerIndexRef,
-    };
-    const [gainValue, setGainValue] = useState(volume / 100);
-    const [isSyncedFromServer, setIsSyncedFromServer] = useState(false);
+    const { enabled, onServerUpdate, playerRef, serverId } = props;
 
     const jukeboxControlMutation = useJukeboxControl();
 
-    const callApi: JukeboxCallApi = async (action, queryParams = {}) => {
-        if (!serverId) return null;
+    const callApi = async (
+        action: JukeboxControlAction,
+        queryParams: {
+            gain?: number;
+            id?: string | string[];
+            index?: number;
+            offset?: number;
+        } = {},
+    ): Promise<JukeboxControlResponse> => {
         try {
             return await jukeboxControlMutation.mutateAsync({
                 apiClientProps: { serverId },
-                query: {
-                    action,
-                    ...queryParams,
-                },
+                query: { action, ...queryParams },
             });
-        } catch {
+        } catch (error) {
+            logger.warn('Jukebox request failed', { action, error });
             return null;
         }
     };
 
-    // 0. On startup, read existing server jukebox state before pushing local state
+    const callApiRef = useRef(callApi);
+    callApiRef.current = callApi;
+    const onServerUpdateRef = useRef(onServerUpdate);
+    onServerUpdateRef.current = onServerUpdate;
+
+    const epochRef = useRef(0);
+    const readyRef = useRef(false);
+    const lastSeenRef = useRef<JukeboxSeenState | null>(null);
+    const lastPushedRef = useRef<null | string[]>(null);
+    const pendingRef = useRef(0);
+    const generationRef = useRef(0);
+    const holdUntilRef = useRef(0);
+    const chainRef = useRef<Promise<void>>(Promise.resolve());
+    const syncTimerRef = useRef<null | ReturnType<typeof setTimeout>>(null);
+    const tickBusyRef = useRef(false);
+
+    // Commands run strictly one after another so a poll never reads a half-applied queue.
+    const enqueue = (job: () => Promise<void>): Promise<void> => {
+        pendingRef.current++;
+        generationRef.current++;
+
+        const run = chainRef.current.then(async () => {
+            try {
+                await job();
+            } catch (error) {
+                logger.error('Jukebox command failed', { error });
+            } finally {
+                pendingRef.current--;
+                generationRef.current++;
+                holdUntilRef.current = Date.now() + COMMAND_HOLD_MS;
+            }
+        });
+
+        chainRef.current = run;
+        return run;
+    };
+
+    // After a failed call the server state is unknown: forget what we assumed so the
+    // next poll adopts the server's truth and the next queue sync does a full replace.
+    const sendCalls = async (calls: JukeboxCall[]): Promise<boolean> => {
+        for (const call of calls) {
+            const res = await callApiRef.current(call.action, {
+                gain: call.gain,
+                id: call.ids,
+                index: call.index,
+                offset: call.offset,
+            });
+
+            if (res === null) {
+                lastSeenRef.current = null;
+                lastPushedRef.current = null;
+                return false;
+            }
+        }
+
+        return true;
+    };
+
+    const patchLastSeen = (patch: Partial<JukeboxSeenState>) => {
+        if (lastSeenRef.current) {
+            lastSeenRef.current = { ...lastSeenRef.current, ...patch };
+        }
+    };
+
+    const syncQueue = async (forceSkip: boolean) => {
+        if (!readyRef.current) {
+            return;
+        }
+
+        const snapshot = readSnapshot();
+        const plan = resolveQueueSync(
+            lastPushedRef.current,
+            snapshot.orderIds,
+            lastSeenRef.current?.index ?? null,
+        );
+        const shouldStart = snapshot.status === PlayerStatus.PLAYING;
+        const calls = planToCalls(plan, {
+            currentServerIndex: snapshot.currentServerIndex,
+            hadPushedIds: (lastPushedRef.current?.length ?? 0) > 0,
+            positionSeconds: snapshot.timestamp,
+            shouldStart,
+        });
+
+        const skipToCurrent =
+            plan.type !== 'replace' &&
+            forceSkip &&
+            snapshot.currentServerIndex !== null &&
+            snapshot.orderIds.length > 0;
+
+        if (skipToCurrent) {
+            calls.push({ action: 'skip', index: snapshot.currentServerIndex!, offset: 0 });
+        }
+
+        if (calls.length === 0) {
+            return;
+        }
+
+        if (!(await sendCalls(calls))) {
+            return;
+        }
+
+        lastPushedRef.current = snapshot.orderIds;
+
+        if (plan.type === 'replace') {
+            patchLastSeen({ index: snapshot.currentServerIndex ?? 0, playing: shouldStart });
+        } else if (
+            plan.type === 'remove' &&
+            lastSeenRef.current &&
+            plan.index < lastSeenRef.current.index
+        ) {
+            patchLastSeen({ index: lastSeenRef.current.index - 1 });
+        }
+
+        if (skipToCurrent) {
+            patchLastSeen({ index: snapshot.currentServerIndex! });
+        }
+    };
+
+    const scheduleQueueSync = () => {
+        if (!readyRef.current) {
+            return;
+        }
+
+        if (syncTimerRef.current) {
+            clearTimeout(syncTimerRef.current);
+        }
+
+        syncTimerRef.current = setTimeout(() => {
+            syncTimerRef.current = null;
+            void enqueue(() => syncQueue(false));
+        }, QUEUE_SYNC_DEBOUNCE_MS);
+    };
+
+    const initialize = async (epoch: number) => {
+        const res = await callApiRef.current('get');
+        if (epoch !== epochRef.current || res === null) {
+            return;
+        }
+
+        const playlist = res.jukeboxPlaylist;
+        const serverIds = playlist?.entry?.map((entry) => entry.id) ?? [];
+        const snapshot = readSnapshot();
+
+        const decision = decideStartup(serverIds, snapshot.orderIds);
+
+        if (decision === 'idle' && playlist) {
+            // Nothing local to show: leave the device alone and only take over its volume.
+            const seen: JukeboxSeenState = {
+                gain: playlist.gain,
+                index: playlist.currentIndex ?? 0,
+                playing: playlist.playing,
+            };
+            lastPushedRef.current = null;
+            lastSeenRef.current = seen;
+            onServerUpdateRef.current({
+                ...seen,
+                changes: { gain: true, index: false, playing: false },
+                position: null,
+            });
+        } else if (decision === 'adopt' && playlist) {
+            const seen: JukeboxSeenState = {
+                gain: playlist.gain,
+                index: playlist.currentIndex ?? 0,
+                playing: playlist.playing,
+            };
+            lastPushedRef.current = serverIds;
+            lastSeenRef.current = seen;
+            onServerUpdateRef.current({
+                ...seen,
+                changes: diffServerState(null, seen),
+                position: playlist.position ?? null,
+            });
+        } else {
+            // The server stays stopped until the user presses play; only its volume is taken over.
+            const ok = await enqueue(async () => {
+                const calls = planToCalls(
+                    { ids: snapshot.orderIds, type: 'replace' },
+                    {
+                        currentServerIndex: snapshot.currentServerIndex,
+                        hadPushedIds: false,
+                        positionSeconds: snapshot.timestamp,
+                        shouldStart: false,
+                    },
+                );
+
+                if (epoch !== epochRef.current || !(await sendCalls(calls))) {
+                    return;
+                }
+
+                lastPushedRef.current = snapshot.orderIds;
+                const gain = playlist?.gain;
+                const seen: JukeboxSeenState = {
+                    gain: gain ?? 0,
+                    index: snapshot.currentServerIndex ?? 0,
+                    playing: false,
+                };
+                lastSeenRef.current = gain === undefined ? null : seen;
+
+                if (gain !== undefined) {
+                    onServerUpdateRef.current({
+                        changes: {
+                            gain: true,
+                            index: false,
+                            playing: snapshot.status === PlayerStatus.PLAYING,
+                        },
+                        gain,
+                        index: seen.index,
+                        playing: false,
+                        position: null,
+                    });
+                }
+            }).then(() => lastPushedRef.current !== null);
+
+            if (!ok) {
+                return;
+            }
+        }
+
+        if (epoch !== epochRef.current) {
+            return;
+        }
+
+        readyRef.current = true;
+        scheduleQueueSync();
+    };
+
+    const pollOnce = async (epoch: number) => {
+        const generation = generationRef.current;
+        const res = await callApiRef.current('get');
+        const playlist = res?.jukeboxPlaylist;
+
+        if (
+            epoch !== epochRef.current ||
+            generation !== generationRef.current ||
+            pendingRef.current > 0 ||
+            !playlist
+        ) {
+            return;
+        }
+
+        if (lastPushedRef.current === null && readSnapshot().orderIds.length > 0) {
+            scheduleQueueSync();
+        }
+
+        const incoming: JukeboxSeenState = {
+            gain: playlist.gain,
+            index: playlist.currentIndex ?? 0,
+            playing: playlist.playing,
+        };
+        const changes = diffServerState(lastSeenRef.current, incoming);
+
+        lastSeenRef.current = {
+            ...incoming,
+            gain: changes.gain || !lastSeenRef.current ? incoming.gain : lastSeenRef.current.gain,
+        };
+
+        onServerUpdateRef.current({ ...incoming, changes, position: playlist.position ?? null });
+    };
+
+    const tick = async () => {
+        if (tickBusyRef.current || pendingRef.current > 0) {
+            return;
+        }
+
+        const epoch = epochRef.current;
+        tickBusyRef.current = true;
+
+        try {
+            if (!readyRef.current) {
+                await initialize(epoch);
+            } else if (Date.now() >= holdUntilRef.current) {
+                await pollOnce(epoch);
+            }
+        } finally {
+            tickBusyRef.current = false;
+        }
+    };
+
+    const tickRef = useRef(tick);
+    tickRef.current = tick;
+
+    const resetRef = useRef(() => {});
+    resetRef.current = () => {
+        epochRef.current++;
+        readyRef.current = false;
+        lastSeenRef.current = null;
+        lastPushedRef.current = null;
+
+        if (syncTimerRef.current) {
+            clearTimeout(syncTimerRef.current);
+            syncTimerRef.current = null;
+        }
+    };
+
     useEffect(() => {
         if (!enabled) {
             return;
         }
 
-        let cancelled = false;
+        const reset = resetRef.current;
+        reset();
 
-        const syncFromServer = async () => {
-            setIsSyncedFromServer(false);
-
-            const res = await callApi('get');
-            if (cancelled) {
-                return;
-            }
-
-            const playlist = res?.jukeboxPlaylist;
-            if (!playlist) {
-                serverPlayingRef.current = false;
-                setIsSyncedFromServer(true);
-                return;
-            }
-
-            const { currentTrackId: serverTrackId, nextTrackId: serverNextTrackId } =
-                getPlaylistTrackIds(playlist);
-            const { gain, playing, position } = playlist;
-
-            lastCurrentTrackIdRef.current = serverTrackId;
-            lastNextTrackIdRef.current = serverNextTrackId;
-            lastServerIndexRef.current = playlist.currentIndex ?? 0;
-
-            if (position !== undefined && position !== null) {
-                lastPositionRef.current = position;
-            }
-
-            serverPlayingRef.current = playing;
-
-            if (gain !== undefined) {
-                setGainValue(gain);
-            }
-
-            onServerStateSynced?.({
-                gain: gain ?? gainValue,
-                nextTrackId: serverNextTrackId,
-                playing,
-                position: position ?? 0,
-                trackId: serverTrackId,
-            });
-
-            if (!cancelled) {
-                setIsSyncedFromServer(true);
-            }
-        };
-
-        syncFromServer();
+        void tickRef.current();
+        const interval = setInterval(() => void tickRef.current(), POLL_INTERVAL_MS);
 
         return () => {
-            cancelled = true;
+            clearInterval(interval);
+            reset();
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [enabled, serverId]);
 
-    // 1. Keep server queue aligned with local current + next songs
-    useEffect(() => {
-        if (!isSyncedFromServer || isChangingTrackRef.current) {
+    const command = (calls: () => JukeboxCall[], onSent?: () => void) => {
+        if (!readyRef.current) {
             return;
         }
 
-        const syncQueue = async () => {
-            if (!currentTrackId) {
-                if (!serverPlayingRef.current) {
-                    await callApi('clear');
-                    lastCurrentTrackIdRef.current = null;
-                    lastNextTrackIdRef.current = null;
-                    lastServerIndexRef.current = -1;
-                    lastPositionRef.current = -1;
-                }
+        const epoch = epochRef.current;
+        void enqueue(async () => {
+            if (epoch !== epochRef.current) {
                 return;
             }
 
-            const currentChanged = currentTrackId !== lastCurrentTrackIdRef.current;
-            const nextChanged = nextTrackId !== lastNextTrackIdRef.current;
-
-            if (!currentChanged && !nextChanged) {
-                return;
+            if (await sendCalls(calls())) {
+                onSent?.();
             }
-
-            isChangingTrackRef.current = true;
-
-            try {
-                if (currentChanged) {
-                    await replaceJukeboxQueue(
-                        callApi,
-                        queueRefs,
-                        currentTrackId,
-                        nextTrackId,
-                        playerStatus === PlayerStatus.PLAYING,
-                    );
-                    serverPlayingRef.current = playerStatus === PlayerStatus.PLAYING;
-                    lastPositionRef.current = -1;
-                } else if (nextChanged) {
-                    await setJukeboxQueueNext(callApi, queueRefs, nextTrackId);
-                }
-            } finally {
-                setTimeout(() => {
-                    isChangingTrackRef.current = false;
-                }, TRACK_SETUP_DELAY_MS);
-            }
-        };
-
-        syncQueue();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [currentTrackId, isSyncedFromServer, nextTrackId, playerStatus]);
-
-    // 2. Play/Pause Matcher
-    useEffect(() => {
-        if (!isSyncedFromServer || isChangingTrackRef.current) {
-            return;
-        }
-
-        const shouldPlay = playerStatus === PlayerStatus.PLAYING;
-        if (serverPlayingRef.current === shouldPlay) {
-            return;
-        }
-
-        if (shouldPlay) {
-            callApi('start');
-        } else {
-            callApi('stop');
-        }
-
-        serverPlayingRef.current = shouldPlay;
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [playerStatus, isSyncedFromServer]);
-
-    // 3. Audio Level Matcher
-    useEffect(() => {
-        if (!isSyncedFromServer) {
-            return;
-        }
-
-        const gain = isMuted ? 0 : gainValue;
-        callApi('setGain', { gain });
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [gainValue, isMuted, isSyncedFromServer]);
-
-    // 4. Position Tick Updates + server-side auto-advance detection
-    useEffect(() => {
-        if (pollRef.current) clearInterval(pollRef.current);
-        if (!isSyncedFromServer || playerStatus !== PlayerStatus.PLAYING) return;
-
-        pollRef.current = setInterval(async () => {
-            if (isChangingTrackRef.current) return;
-
-            const res = await callApi('get');
-            if (!res?.jukeboxPlaylist) return;
-
-            const playlist = res.jukeboxPlaylist;
-            const { playing, position } = playlist;
-            const currentIndex = playlist.currentIndex ?? 0;
-            const { currentTrackId: serverTrackId } = getPlaylistTrackIds(playlist);
-
-            serverPlayingRef.current = playing;
-
-            const serverAutoAdvanced =
-                playing &&
-                lastServerIndexRef.current === 0 &&
-                currentIndex === 1 &&
-                serverTrackId === lastNextTrackIdRef.current;
-
-            if (serverAutoAdvanced) {
-                isChangingTrackRef.current = true;
-                try {
-                    const playerData = onEnded();
-                    await handleJukeboxAutoNext(callApi, queueRefs, playerData);
-                    lastPositionRef.current = position ?? 0;
-                    if (position !== undefined && position !== null) {
-                        onTick(position);
-                    }
-                } finally {
-                    isChangingTrackRef.current = false;
-                }
-
-                lastServerIndexRef.current = currentIndex;
-                return;
-            }
-
-            lastServerIndexRef.current = currentIndex;
-
-            if (!playing && lastPositionRef.current > 0) {
-                lastPositionRef.current = -1;
-                onEnded();
-                return;
-            }
-
-            if (position !== undefined && position !== null) {
-                lastPositionRef.current = position;
-                onTick(position);
-            }
-        }, 1000);
-
-        return () => {
-            if (pollRef.current) clearInterval(pollRef.current);
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isSyncedFromServer, playerStatus, onEnded, onTick]);
+        });
+    };
 
     useImperativeHandle<JukeboxPlayerEngineHandle, JukeboxPlayerEngineHandle>(playerRef, () => ({
         decreaseVolume(by: number) {
-            const next = Math.max(0, gainValue - by / 100);
-            setGainValue(next);
+            this.setVolume(usePlayerStoreBase.getState().player.volume - by);
         },
         increaseVolume(by: number) {
-            const next = Math.min(1, gainValue + by / 100);
-            setGainValue(next);
+            this.setVolume(usePlayerStoreBase.getState().player.volume + by);
         },
         pause() {
-            serverPlayingRef.current = false;
-            callApi('stop');
+            command(
+                () => [{ action: 'stop' }],
+                () => patchLastSeen({ playing: false }),
+            );
         },
         play() {
-            serverPlayingRef.current = true;
-            callApi('start');
+            command(
+                () => [{ action: 'start' }],
+                () => patchLastSeen({ playing: true }),
+            );
+        },
+        queueChanged() {
+            scheduleQueueSync();
         },
         seekTo(seconds: number) {
-            if (isChangingTrackRef.current) return;
-            callApi('skip', { index: 0, offset: Math.floor(seconds) });
+            const index = readSnapshot().currentServerIndex;
+            if (index === null) {
+                return;
+            }
+
+            command(
+                () => [{ action: 'skip', index, offset: Math.max(0, Math.floor(seconds)) }],
+                () => patchLastSeen({ index }),
+            );
         },
         setVolume(vol: number) {
-            const gain = vol / 100;
-            setGainValue(gain);
-            callApi('setGain', { gain });
+            const gain = Math.min(1, Math.max(0, vol / 100));
+            command(
+                () => [{ action: 'setGain', gain }],
+                () => patchLastSeen({ gain }),
+            );
+        },
+        trackChanged() {
+            if (!readyRef.current) {
+                return;
+            }
+
+            // Flush any pending queue edit first so the skip index refers to the pushed order.
+            if (syncTimerRef.current) {
+                clearTimeout(syncTimerRef.current);
+                syncTimerRef.current = null;
+            }
+
+            const epoch = epochRef.current;
+            void enqueue(async () => {
+                if (epoch === epochRef.current) {
+                    await syncQueue(true);
+                }
+            });
         },
     }));
 
