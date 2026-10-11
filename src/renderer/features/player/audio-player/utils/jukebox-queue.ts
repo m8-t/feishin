@@ -105,6 +105,7 @@ export function serverIndexToQueueIndex(
 }
 
 export const GAIN_EPSILON = 0.01;
+export const SEEK_ECHO_WINDOW_MS = 400;
 
 export type JukeboxCall = {
     action: 'add' | 'clear' | 'remove' | 'set' | 'setGain' | 'skip' | 'start' | 'stop';
@@ -159,6 +160,15 @@ export function diffServerState(
         index: incoming.index !== lastSeen.index,
         playing: incoming.playing !== lastSeen.playing,
     };
+}
+
+// The startup timestamp restore seeks about 100 ms after a play status change. A person
+// cannot seek that fast, so a seek right after a status event is not a user action.
+export function isSeekEcho(
+    msSinceStatusEvent: null | number,
+    windowMs: number = SEEK_ECHO_WINDOW_MS,
+): boolean {
+    return msSinceStatusEvent !== null && msSinceStatusEvent >= 0 && msSinceStatusEvent < windowMs;
 }
 
 export function planToCalls(plan: QueueSyncPlan, context: PlanCallsContext): JukeboxCall[] {

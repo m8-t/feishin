@@ -144,6 +144,13 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
     // next poll adopts the server's truth and the next queue sync does a full replace.
     const sendCalls = async (calls: JukeboxCall[]): Promise<boolean> => {
         for (const call of calls) {
+            logger.info('Jukebox command sent', {
+                action: call.action,
+                gain: call.gain,
+                ids: call.ids?.length ?? 0,
+                index: call.index,
+                offset: call.offset,
+            });
             const res = await callApiRef.current(call.action, {
                 gain: call.gain,
                 id: call.ids,

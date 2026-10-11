@@ -5,6 +5,7 @@ import {
     chunkIds,
     decideStartup,
     diffServerState,
+    isSeekEcho,
     planQueueSync,
     planToCalls,
     playOrderIds,
@@ -310,5 +311,27 @@ describe('resolveQueueSync', () => {
             ids: ['b', 'a'],
             type: 'replace',
         });
+    });
+});
+
+describe('isSeekEcho', () => {
+    it('treats a seek right after a status event as an echo', () => {
+        assert.equal(isSeekEcho(0), true);
+        assert.equal(isSeekEcho(120), true);
+        assert.equal(isSeekEcho(399), true);
+    });
+
+    it('treats later seeks as user actions', () => {
+        assert.equal(isSeekEcho(400), false);
+        assert.equal(isSeekEcho(5000), false);
+    });
+
+    it('treats a seek with no earlier status event as a user action', () => {
+        assert.equal(isSeekEcho(null), false);
+    });
+
+    it('honours a custom window', () => {
+        assert.equal(isSeekEcho(50, 40), false);
+        assert.equal(isSeekEcho(30, 40), true);
     });
 });

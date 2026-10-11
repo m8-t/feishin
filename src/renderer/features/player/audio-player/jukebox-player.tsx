@@ -6,7 +6,10 @@ import {
     JukeboxServerUpdate,
 } from '/@/renderer/features/player/audio-player/engine/jukebox-player-engine';
 import { usePlayerEvents } from '/@/renderer/features/player/audio-player/hooks/use-player-events';
-import { serverIndexToQueueIndex } from '/@/renderer/features/player/audio-player/utils/jukebox-queue';
+import {
+    isSeekEcho,
+    serverIndexToQueueIndex,
+} from '/@/renderer/features/player/audio-player/utils/jukebox-queue';
 import { usePlayer } from '/@/renderer/features/player/context/player-context';
 import {
     isShuffleEnabled,
@@ -22,6 +25,7 @@ import { PlayerStatus } from '/@/shared/types/types';
 export function JukeboxPlayer() {
     const playerRef = useRef<JukeboxPlayerEngineHandle>(null);
     const applyingRemoteRef = useRef(false);
+    const lastStatusEventAtRef = useRef<null | number>(null);
     const { mediaPause, mediaPlay, mediaPlayByIndex, setTimestamp, setVolume } = usePlayerActions();
     const player = usePlayer();
     const playerHydrated = usePlayerHydrated();
@@ -113,7 +117,12 @@ export function JukeboxPlayer() {
                 playerRef.current?.queueChanged();
             },
             onPlayerSeekToTimestamp: (properties) => {
-                if (applyingRemoteRef.current) {
+                const sinceStatus =
+                    lastStatusEventAtRef.current === null
+                        ? null
+                        : Date.now() - lastStatusEventAtRef.current;
+
+                if (applyingRemoteRef.current || isSeekEcho(sinceStatus)) {
                     return;
                 }
 
@@ -123,6 +132,8 @@ export function JukeboxPlayer() {
                 playerRef.current?.queueChanged();
             },
             onPlayerStatus: (properties) => {
+                lastStatusEventAtRef.current = Date.now();
+
                 if (applyingRemoteRef.current) {
                     return;
                 }
