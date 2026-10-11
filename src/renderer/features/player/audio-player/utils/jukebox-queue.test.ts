@@ -5,6 +5,7 @@ import {
     chunkIds,
     decideStartup,
     diffServerState,
+    isCompleteSongEntry,
     isSeekEcho,
     isSongChangeSeekReset,
     planQueueSync,
@@ -13,6 +14,7 @@ import {
     queueIndexToServerIndex,
     resolveQueueSync,
     serverIndexToQueueIndex,
+    serverQueueChanged,
     shouldSendGain,
     shouldSendMute,
     shouldSendPlayState,
@@ -216,25 +218,78 @@ describe('diffServerState', () => {
 describe('decideStartup', () => {
     it('adopts when the ids match', () => {
         assert.equal(decideStartup(['a', 'b'], ['a', 'b']), 'adopt');
+    });
+
+    it('adopts when both are empty', () => {
         assert.equal(decideStartup([], []), 'adopt');
     });
 
-    it('pushes when the ids differ', () => {
-        assert.equal(decideStartup(['a', 'b'], ['b', 'a']), 'push');
-        assert.equal(decideStartup(['a'], ['a', 'b']), 'push');
-        assert.equal(decideStartup(['a', 'b'], ['a']), 'push');
+    it('takes the server queue when the local queue is empty', () => {
+        assert.equal(decideStartup(['a', 'b'], []), 'take');
+    });
+
+    it('takes the server queue when the order differs', () => {
+        assert.equal(decideStartup(['a', 'b'], ['b', 'a']), 'take');
+    });
+
+    it('takes the server queue when the length differs', () => {
+        assert.equal(decideStartup(['a'], ['a', 'b']), 'take');
+        assert.equal(decideStartup(['a', 'b'], ['a']), 'take');
     });
 
     it('pushes when the server is empty and the local queue is not', () => {
         assert.equal(decideStartup([], ['a']), 'push');
     });
+});
 
-    it('stays idle when the local queue is empty and the server is not', () => {
-        assert.equal(decideStartup(['a', 'b'], []), 'idle');
+describe('serverQueueChanged', () => {
+    it('is false while a local push is still owed', () => {
+        assert.equal(serverQueueChanged(null, ['a']), false);
+        assert.equal(serverQueueChanged(null, []), false);
     });
 
-    it('adopts when both are empty', () => {
-        assert.equal(decideStartup([], []), 'adopt');
+    it('is false when equal', () => {
+        assert.equal(serverQueueChanged(['a', 'b'], ['a', 'b']), false);
+        assert.equal(serverQueueChanged([], []), false);
+    });
+
+    it('is true when the length differs', () => {
+        assert.equal(serverQueueChanged(['a'], ['a', 'b']), true);
+        assert.equal(serverQueueChanged(['a', 'b'], ['a']), true);
+    });
+
+    it('is true when the order differs', () => {
+        assert.equal(serverQueueChanged(['a', 'b'], ['b', 'a']), true);
+    });
+
+    it('is true when the server queue was emptied', () => {
+        assert.equal(serverQueueChanged(['a'], []), true);
+    });
+});
+
+describe('isCompleteSongEntry', () => {
+    const complete = { contentType: 'audio/flac', id: 'x', title: 'T' };
+
+    it('accepts a complete entry', () => {
+        assert.equal(isCompleteSongEntry(complete), true);
+    });
+
+    it('rejects an entry without contentType', () => {
+        assert.equal(isCompleteSongEntry({ id: 'x', title: 'T' }), false);
+    });
+
+    it('rejects an entry without a string id', () => {
+        assert.equal(isCompleteSongEntry({ ...complete, id: 5 }), false);
+    });
+
+    it('rejects an entry without a string title', () => {
+        assert.equal(isCompleteSongEntry({ ...complete, title: undefined }), false);
+    });
+
+    it('rejects non-objects and empty objects', () => {
+        assert.equal(isCompleteSongEntry(null), false);
+        assert.equal(isCompleteSongEntry('x'), false);
+        assert.equal(isCompleteSongEntry({}), false);
     });
 });
 

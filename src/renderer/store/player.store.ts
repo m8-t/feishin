@@ -64,6 +64,7 @@ interface Actions {
     moveSelectedToBottom: (items: QueueSong[]) => void;
     moveSelectedToNext: (items: QueueSong[]) => void;
     moveSelectedToTop: (items: QueueSong[]) => void;
+    replaceQueueFromServer: (items: Song[], index: number) => void;
     setCrossfadeDuration: (duration: number) => void;
     setCrossfadeStyle: (style: CrossfadeStyle) => void;
     setPauseOnNextSongEnd: (value: boolean) => void;
@@ -1503,6 +1504,23 @@ export const usePlayerStoreBase = createWithEqualityFn<PlayerState>()(
                         position: position ?? 0,
                     });
                 },
+                replaceQueueFromServer: (items, index) => {
+                    const newItems = items.map(toQueueSong);
+
+                    set((state) => {
+                        state.queue.songs = Object.fromEntries(
+                            newItems.map((item) => [item._uniqueId, item]),
+                        );
+                        state.queue.default = newItems.map((item) => item._uniqueId);
+                        state.queue.shuffled = [];
+                        state.player.shuffle = PlayerShuffle.NONE;
+                        state.player.index =
+                            newItems.length === 0
+                                ? -1
+                                : Math.min(Math.max(index, 0), newItems.length - 1);
+                        state.player.playerNum = 1;
+                    });
+                },
                 ...initialState,
                 setCrossfadeDuration: (duration: number) => {
                     set((state) => {
@@ -1825,6 +1843,7 @@ export const usePlayerActions = () => {
             moveSelectedToBottom: state.moveSelectedToBottom,
             moveSelectedToNext: state.moveSelectedToNext,
             moveSelectedToTop: state.moveSelectedToTop,
+            replaceQueueFromServer: state.replaceQueueFromServer,
             setCrossfadeDuration: state.setCrossfadeDuration,
             setCrossfadeStyle: state.setCrossfadeStyle,
             setPauseOnNextSongEnd: state.setPauseOnNextSongEnd,

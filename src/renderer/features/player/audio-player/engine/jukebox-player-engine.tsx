@@ -1,4 +1,5 @@
 import type { RefObject } from 'react';
+import type { z } from 'zod';
 
 import { useEffect, useImperativeHandle, useRef } from 'react';
 
@@ -7,12 +8,14 @@ import { AudioPlayer } from '/@/renderer/features/player/audio-player/types';
 import {
     decideStartup,
     diffServerState,
+    isCompleteSongEntry,
     JukeboxCall,
     JukeboxSeenState,
     planToCalls,
     playOrderIds,
     queueIndexToServerIndex,
     resolveQueueSync,
+    serverQueueChanged,
     ServerStateChanges,
     shouldSendGain,
     shouldSendMute,
@@ -26,6 +29,7 @@ import {
 } from '/@/renderer/store';
 import { usePlayerStoreBase } from '/@/renderer/store/player.store';
 import { logger } from '/@/renderer/utils/logger';
+import { ssType } from '/@/shared/api/subsonic/subsonic-types';
 import { JukeboxControlAction, JukeboxControlResponse } from '/@/shared/types/domain-types';
 import { PlayerStatus } from '/@/shared/types/types';
 
@@ -43,6 +47,7 @@ export type JukeboxServerUpdate = {
     muted?: boolean;
     playing: boolean;
     position: null | number;
+    queue?: Array<z.infer<typeof ssType._response.song>>;
 };
 
 interface JukeboxPlayerEngineProps {
@@ -271,6 +276,42 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         }, QUEUE_SYNC_DEBOUNCE_MS);
     };
 
+    // The server queue wins: remember it as pushed and seen first so the store events the
+    // replace fires compute an empty queue diff and send nothing.
+    const deliverServerQueue = (
+        playlist: NonNullable<NonNullable<JukeboxControlResponse>['jukeboxPlaylist']>,
+        serverIds: string[],
+        seen: JukeboxSeenState,
+    ) => {
+        lastPushedRef.current = serverIds;
+        lastSeenRef.current = seen;
+
+        const entries = playlist.entry ?? [];
+
+        if (entries.every(isCompleteSongEntry)) {
+            onServerUpdateRef.current({
+                ...seen,
+                changes: diffServerState(null, seen),
+                position: playlist.position ?? null,
+                // isCompleteSongEntry guarantees the fields normalizeSong dereferences.
+                queue: entries as unknown as NonNullable<JukeboxServerUpdate['queue']>,
+            });
+            return;
+        }
+
+        logger.warn('Jukebox server queue cannot be shown: entries lack song details');
+        onServerUpdateRef.current({
+            ...seen,
+            changes: {
+                gain: true,
+                index: false,
+                muted: seen.muted !== undefined,
+                playing: false,
+            },
+            position: null,
+        });
+    };
+
     const initialize = async (epoch: number) => {
         const res = await callApiRef.current('get');
         if (epoch !== epochRef.current) {
@@ -296,25 +337,12 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             serverTracks: serverIds.length,
         });
 
-        if (decision === 'idle' && playlist) {
-            // Nothing local to show: leave the device alone and only take over its volume.
-            const seen: JukeboxSeenState = {
+        if (decision === 'take' && playlist) {
+            deliverServerQueue(playlist, serverIds, {
                 gain: playlist.gain,
                 index: playlist.currentIndex ?? 0,
                 muted: playlist.muted,
                 playing: playlist.playing,
-            };
-            lastPushedRef.current = null;
-            lastSeenRef.current = seen;
-            onServerUpdateRef.current({
-                ...seen,
-                changes: {
-                    gain: true,
-                    index: false,
-                    muted: seen.muted !== undefined,
-                    playing: false,
-                },
-                position: null,
             });
         } else if (decision === 'adopt' && playlist) {
             const seen: JukeboxSeenState = {
@@ -413,6 +441,17 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             muted: playlist.muted,
             playing: playlist.playing,
         };
+
+        const serverIds = playlist.entry?.map((entry) => entry.id) ?? [];
+        if (syncTimerRef.current === null && serverQueueChanged(lastPushedRef.current, serverIds)) {
+            logger.info('Jukebox server queue changed', {
+                localTracks: readSnapshot().orderIds.length,
+                serverTracks: serverIds.length,
+            });
+            deliverServerQueue(playlist, serverIds, incoming);
+            return;
+        }
+
         const changes = diffServerState(lastSeenRef.current, incoming);
 
         lastSeenRef.current = {

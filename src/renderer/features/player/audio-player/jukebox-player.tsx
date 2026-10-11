@@ -18,8 +18,10 @@ import {
     usePlayerActions,
     usePlayerHydrated,
 } from '/@/renderer/store';
+import { useAuthStore } from '/@/renderer/store/auth.store';
 import { usePlayerStoreBase } from '/@/renderer/store/player.store';
 import { logger } from '/@/renderer/utils/logger';
+import { ssNormalize } from '/@/shared/api/subsonic/subsonic-normalize';
 import { useDebouncedCallback } from '/@/shared/hooks/use-debounced-callback';
 import { PlayerStatus } from '/@/shared/types/types';
 
@@ -28,8 +30,15 @@ export function JukeboxPlayer() {
     const applyingRemoteRef = useRef(false);
     const lastStatusEventAtRef = useRef<null | number>(null);
     const lastSongChangeAtRef = useRef<null | number>(null);
-    const { mediaPause, mediaPlay, mediaPlayByIndex, mediaToggleMute, setTimestamp, setVolume } =
-        usePlayerActions();
+    const {
+        mediaPause,
+        mediaPlay,
+        mediaPlayByIndex,
+        mediaToggleMute,
+        replaceQueueFromServer,
+        setTimestamp,
+        setVolume,
+    } = usePlayerActions();
     const player = usePlayer();
     const playerHydrated = usePlayerHydrated();
 
@@ -50,7 +59,21 @@ export function JukeboxPlayer() {
             applyingRemoteRef.current = true;
 
             try {
-                const { changes, gain, index, muted, playing, position } = update;
+                const { changes, gain, index, muted, playing, position, queue } = update;
+
+                if (queue) {
+                    const server = useAuthStore.getState().currentServer;
+
+                    if (server) {
+                        replaceQueueFromServer(
+                            queue.map((entry) => ssNormalize.song(entry, server)),
+                            index,
+                        );
+                    } else {
+                        logger.warn('Jukebox server queue not applied: no current server');
+                    }
+                }
+
                 const state = usePlayerStoreBase.getState();
 
                 if (changes.muted && muted !== undefined && state.player.muted !== muted) {
@@ -100,7 +123,15 @@ export function JukeboxPlayer() {
                 applyingRemoteRef.current = false;
             }
         },
-        [mediaPause, mediaPlay, mediaPlayByIndex, mediaToggleMute, setTimestamp, setVolume],
+        [
+            mediaPause,
+            mediaPlay,
+            mediaPlayByIndex,
+            mediaToggleMute,
+            replaceQueueFromServer,
+            setTimestamp,
+            setVolume,
+        ],
     );
 
     const debouncedSeekToTimestamp = useDebouncedCallback(

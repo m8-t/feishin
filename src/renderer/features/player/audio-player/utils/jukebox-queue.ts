@@ -140,14 +140,43 @@ export type ServerStateChanges = {
 export function decideStartup(
     serverIds: readonly string[],
     localIds: readonly string[],
-): 'adopt' | 'idle' | 'push' {
-    if (localIds.length === 0 && serverIds.length > 0) {
-        return 'idle';
-    }
-
+): 'adopt' | 'push' | 'take' {
     const equal =
         serverIds.length === localIds.length && serverIds.every((id, i) => id === localIds[i]);
-    return equal ? 'adopt' : 'push';
+
+    if (equal) {
+        return 'adopt';
+    }
+
+    return serverIds.length > 0 ? 'take' : 'push';
+}
+
+export function serverQueueChanged(
+    lastPushed: null | readonly string[],
+    serverIds: readonly string[],
+): boolean {
+    if (lastPushed === null) {
+        return false;
+    }
+
+    return (
+        lastPushed.length !== serverIds.length || lastPushed.some((id, i) => id !== serverIds[i])
+    );
+}
+
+// normalizeSong dereferences contentType without a null check (contentType.startsWith);
+// id and title are required by the song schema and used as queue identity and display name.
+export function isCompleteSongEntry(entry: unknown): boolean {
+    if (entry === null || typeof entry !== 'object') {
+        return false;
+    }
+
+    const record = entry as Record<string, unknown>;
+    return (
+        typeof record.id === 'string' &&
+        typeof record.title === 'string' &&
+        typeof record.contentType === 'string'
+    );
 }
 
 export function diffServerState(
