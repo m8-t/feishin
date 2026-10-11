@@ -98,7 +98,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
                 query: { action, ...queryParams },
             });
         } catch (error) {
-            logger.warn('Jukebox request failed', { action, error });
+            logger.warn('Jukebox request failed', { action, error: String(error) });
             return null;
         }
     };
@@ -128,7 +128,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             try {
                 await job();
             } catch (error) {
-                logger.error('Jukebox command failed', { error });
+                logger.error('Jukebox command failed', { error: String(error) });
             } finally {
                 pendingRef.current--;
                 generationRef.current++;
@@ -223,6 +223,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
 
     const scheduleQueueSync = () => {
         if (!readyRef.current) {
+            logger.warn('Jukebox queue sync skipped: engine not ready');
             return;
         }
 
@@ -238,7 +239,12 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
 
     const initialize = async (epoch: number) => {
         const res = await callApiRef.current('get');
-        if (epoch !== epochRef.current || res === null) {
+        if (epoch !== epochRef.current) {
+            return;
+        }
+
+        if (res === null) {
+            logger.warn('Jukebox startup get returned nothing, retrying');
             return;
         }
 
@@ -247,6 +253,11 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         const snapshot = readSnapshot();
 
         const decision = decideStartup(serverIds, snapshot.orderIds);
+        logger.info('Jukebox startup decision', {
+            decision,
+            localTracks: snapshot.orderIds.length,
+            serverTracks: serverIds.length,
+        });
 
         if (decision === 'idle' && playlist) {
             // Nothing local to show: leave the device alone and only take over its volume.
@@ -404,6 +415,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
 
         const reset = resetRef.current;
         reset();
+        logger.info('Jukebox engine enabled', { serverId });
 
         void tickRef.current();
         const interval = setInterval(() => void tickRef.current(), POLL_INTERVAL_MS);
@@ -416,6 +428,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
 
     const command = (calls: () => JukeboxCall[], onSent?: () => void) => {
         if (!readyRef.current) {
+            logger.warn('Jukebox command skipped: engine not ready');
             return;
         }
 
@@ -473,6 +486,7 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         },
         trackChanged() {
             if (!readyRef.current) {
+                logger.warn('Jukebox track change skipped: engine not ready');
                 return;
             }
 

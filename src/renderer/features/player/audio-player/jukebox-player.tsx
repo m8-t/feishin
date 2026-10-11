@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 import {
     JukeboxPlayerEngine,
@@ -15,6 +15,7 @@ import {
     usePlayerHydrated,
 } from '/@/renderer/store';
 import { usePlayerStoreBase } from '/@/renderer/store/player.store';
+import { logger } from '/@/renderer/utils/logger';
 import { useDebouncedCallback } from '/@/shared/hooks/use-debounced-callback';
 import { PlayerStatus } from '/@/shared/types/types';
 
@@ -26,6 +27,15 @@ export function JukeboxPlayer() {
     const playerHydrated = usePlayerHydrated();
 
     const serverId = useCurrentServerId();
+    const enabled = playerHydrated && Boolean(serverId);
+
+    useEffect(() => {
+        logger.info('Jukebox player mounted', {
+            enabled,
+            hasServer: Boolean(serverId),
+            hydrated: playerHydrated,
+        });
+    }, [enabled, playerHydrated, serverId]);
 
     // Store writes made here come from the server; the handlers below must not send them back.
     const handleServerUpdate = useCallback(
@@ -139,7 +149,7 @@ export function JukeboxPlayer() {
 
     return (
         <JukeboxPlayerEngine
-            enabled={playerHydrated && Boolean(serverId)}
+            enabled={enabled}
             onServerUpdate={handleServerUpdate}
             playerRef={playerRef}
             serverId={serverId}
