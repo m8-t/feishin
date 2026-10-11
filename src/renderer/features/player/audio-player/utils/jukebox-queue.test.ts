@@ -12,6 +12,10 @@ import {
     queueIndexToServerIndex,
     resolveQueueSync,
     serverIndexToQueueIndex,
+    shouldSendGain,
+    shouldSendMute,
+    shouldSendPlayState,
+    shouldSendTrackChange,
 } from './jukebox-queue.ts';
 
 const make = (n: number) => Array.from({ length: n }, (_, i) => `id${i}`);
@@ -354,5 +358,38 @@ describe('isSeekEcho', () => {
     it('honours a custom window', () => {
         assert.equal(isSeekEcho(50, 40), false);
         assert.equal(isSeekEcho(30, 40), true);
+    });
+});
+
+describe('echo suppression', () => {
+    const seen = { gain: 0.37, index: 4, muted: false, playing: true };
+
+    it('drops a track change to the index the server reports', () => {
+        assert.equal(shouldSendTrackChange(4, seen), false);
+        assert.equal(shouldSendTrackChange(5, seen), true);
+        assert.equal(shouldSendTrackChange(0, seen), true);
+        assert.equal(shouldSendTrackChange(null, seen), false);
+        assert.equal(shouldSendTrackChange(4, null), true);
+    });
+
+    it('drops a gain within 0.01 of the server and sends one beyond', () => {
+        assert.equal(shouldSendGain(0.37, seen), false);
+        assert.equal(shouldSendGain(0.375, seen), false);
+        assert.equal(shouldSendGain(0.38, seen), true);
+        assert.equal(shouldSendGain(0.2, seen), true);
+        assert.equal(shouldSendGain(0.2, null), true);
+    });
+
+    it('drops a mute equal to the server', () => {
+        assert.equal(shouldSendMute(false, seen), false);
+        assert.equal(shouldSendMute(true, seen), true);
+        assert.equal(shouldSendMute(true, { ...seen, muted: undefined }), true);
+        assert.equal(shouldSendMute(false, null), true);
+    });
+
+    it('drops a play state equal to the server', () => {
+        assert.equal(shouldSendPlayState(true, seen), false);
+        assert.equal(shouldSendPlayState(false, seen), true);
+        assert.equal(shouldSendPlayState(true, null), true);
     });
 });

@@ -14,6 +14,10 @@ import {
     queueIndexToServerIndex,
     resolveQueueSync,
     ServerStateChanges,
+    shouldSendGain,
+    shouldSendMute,
+    shouldSendPlayState,
+    shouldSendTrackChange,
 } from '/@/renderer/features/player/audio-player/utils/jukebox-queue';
 import {
     isShuffleEnabled,
@@ -182,6 +186,14 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         return true;
     };
 
+    const dropEcho = (kind: string, drop: boolean): boolean => {
+        if (drop) {
+            logger.info('Jukebox echo dropped', { kind });
+        }
+
+        return drop;
+    };
+
     const patchLastSeen = (patch: Partial<JukeboxSeenState>) => {
         if (lastSeenRef.current) {
             lastSeenRef.current = { ...lastSeenRef.current, ...patch };
@@ -277,7 +289,9 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         const decision = decideStartup(serverIds, snapshot.orderIds);
         logger.info('Jukebox startup decision', {
             decision,
+            localIndex: snapshot.currentServerIndex,
             localTracks: snapshot.orderIds.length,
+            serverIndex: playlist?.currentIndex,
             serverTracks: serverIds.length,
         });
 
@@ -489,12 +503,20 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
             this.setVolume(usePlayerStoreBase.getState().player.volume + by);
         },
         pause() {
+            if (dropEcho('pause', !shouldSendPlayState(false, lastSeenRef.current))) {
+                return;
+            }
+
             command(
                 () => [{ action: 'stop' }],
                 () => patchLastSeen({ playing: false }),
             );
         },
         play() {
+            if (dropEcho('play', !shouldSendPlayState(true, lastSeenRef.current))) {
+                return;
+            }
+
             command(
                 () => [{ action: 'start' }],
                 () => patchLastSeen({ playing: true }),
@@ -520,6 +542,10 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
                 return;
             }
 
+            if (dropEcho('mute', !shouldSendMute(muted, lastSeenRef.current))) {
+                return;
+            }
+
             command(
                 () => [{ action: 'setMute', mute: muted }],
                 () => patchLastSeen({ muted }),
@@ -527,6 +553,11 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         },
         setVolume(vol: number) {
             const gain = Math.min(1, Math.max(0, vol / 100));
+
+            if (dropEcho('gain', !shouldSendGain(gain, lastSeenRef.current))) {
+                return;
+            }
+
             command(
                 () => [{ action: 'setGain', gain }],
                 () => patchLastSeen({ gain }),
@@ -535,6 +566,15 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         trackChanged() {
             if (!readyRef.current) {
                 logger.warn('Jukebox track change skipped: engine not ready');
+                return;
+            }
+
+            if (
+                dropEcho(
+                    'track',
+                    !shouldSendTrackChange(readSnapshot().currentServerIndex, lastSeenRef.current),
+                )
+            ) {
                 return;
             }
 

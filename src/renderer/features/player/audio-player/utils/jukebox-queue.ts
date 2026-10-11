@@ -224,3 +224,24 @@ export function resolveQueueSync(
 
     return plan;
 }
+
+export function shouldSendGain(gain: number, lastSeen: JukeboxSeenState | null): boolean {
+    return !lastSeen || Math.abs(gain - lastSeen.gain) >= GAIN_EPSILON - 1e-9;
+}
+
+export function shouldSendMute(muted: boolean, lastSeen: JukeboxSeenState | null): boolean {
+    return !lastSeen || lastSeen.muted !== muted;
+}
+
+export function shouldSendPlayState(playing: boolean, lastSeen: JukeboxSeenState | null): boolean {
+    return !lastSeen || lastSeen.playing !== playing;
+}
+
+// A store event that only restates what the server already reported is an echo, however
+// late it arrives, so these compare values instead of relying on a flag that has been cleared.
+export function shouldSendTrackChange(
+    serverIndex: null | number,
+    lastSeen: JukeboxSeenState | null,
+): boolean {
+    return serverIndex !== null && (!lastSeen || lastSeen.index !== serverIndex);
+}
