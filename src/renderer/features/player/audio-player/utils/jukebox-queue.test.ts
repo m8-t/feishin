@@ -6,6 +6,7 @@ import {
     decideStartup,
     diffServerState,
     isSeekEcho,
+    isSongChangeSeekReset,
     planQueueSync,
     planToCalls,
     playOrderIds,
@@ -358,6 +359,30 @@ describe('isSeekEcho', () => {
     it('honours a custom window', () => {
         assert.equal(isSeekEcho(50, 40), false);
         assert.equal(isSeekEcho(30, 40), true);
+    });
+});
+
+describe('isSongChangeSeekReset', () => {
+    it('drops a reset to 0 right after a song change', () => {
+        assert.equal(isSongChangeSeekReset(0, 1050, 1000), true);
+        assert.equal(isSongChangeSeekReset(0, 1000, 1050), true);
+        assert.equal(isSongChangeSeekReset(0, 1399, 1000), true);
+    });
+
+    it('keeps the seek when no song change was seen', () => {
+        assert.equal(isSongChangeSeekReset(0, 1000, null), false);
+    });
+
+    it('treats the window boundary as exclusive', () => {
+        assert.equal(isSongChangeSeekReset(0, 1400, 1000), false);
+    });
+
+    it('keeps seeks to a non-zero position', () => {
+        assert.equal(isSongChangeSeekReset(30, 1050, 1000), false);
+    });
+
+    it('honours a custom window', () => {
+        assert.equal(isSongChangeSeekReset(0, 1150, 1000, 100), false);
     });
 });
 

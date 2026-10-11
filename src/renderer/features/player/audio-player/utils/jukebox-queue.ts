@@ -175,6 +175,23 @@ export function isSeekEcho(
     return msSinceStatusEvent !== null && msSinceStatusEvent >= 0 && msSinceStatusEvent < windowMs;
 }
 
+export const SONG_CHANGE_SEEK_WINDOW_MS = 400;
+
+// Feishin resets its seek position to 0 on every song change. In jukebox mode the track
+// change itself already starts the track at 0, so that reset must not be sent as a seek.
+export function isSongChangeSeekReset(
+    timestamp: number,
+    seekEventAt: number,
+    lastSongChangeAt: null | number,
+    windowMs: number = SONG_CHANGE_SEEK_WINDOW_MS,
+): boolean {
+    return (
+        timestamp === 0 &&
+        lastSongChangeAt !== null &&
+        Math.abs(seekEventAt - lastSongChangeAt) < windowMs
+    );
+}
+
 export function planToCalls(plan: QueueSyncPlan, context: PlanCallsContext): JukeboxCall[] {
     switch (plan.type) {
         case 'append':

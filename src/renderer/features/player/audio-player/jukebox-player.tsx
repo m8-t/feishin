@@ -8,6 +8,7 @@ import {
 import { usePlayerEvents } from '/@/renderer/features/player/audio-player/hooks/use-player-events';
 import {
     isSeekEcho,
+    isSongChangeSeekReset,
     serverIndexToQueueIndex,
 } from '/@/renderer/features/player/audio-player/utils/jukebox-queue';
 import { usePlayer } from '/@/renderer/features/player/context/player-context';
@@ -26,6 +27,7 @@ export function JukeboxPlayer() {
     const playerRef = useRef<JukeboxPlayerEngineHandle>(null);
     const applyingRemoteRef = useRef(false);
     const lastStatusEventAtRef = useRef<null | number>(null);
+    const lastSongChangeAtRef = useRef<null | number>(null);
     const { mediaPause, mediaPlay, mediaPlayByIndex, mediaToggleMute, setTimestamp, setVolume } =
         usePlayerActions();
     const player = usePlayer();
@@ -101,9 +103,17 @@ export function JukeboxPlayer() {
         [mediaPause, mediaPlay, mediaPlayByIndex, mediaToggleMute, setTimestamp, setVolume],
     );
 
-    const debouncedSeekToTimestamp = useDebouncedCallback((timestamp: number) => {
-        playerRef.current?.seekTo(timestamp);
-    }, 300);
+    const debouncedSeekToTimestamp = useDebouncedCallback(
+        (timestamp: number, seekEventAt: number) => {
+            if (isSongChangeSeekReset(timestamp, seekEventAt, lastSongChangeAtRef.current)) {
+                logger.info('Jukebox seek dropped: song change reset');
+                return;
+            }
+
+            playerRef.current?.seekTo(timestamp);
+        },
+        300,
+    );
 
     const debouncedSetVolume = useDebouncedCallback((nextVolume: number) => {
         playerRef.current?.setVolume(nextVolume);
@@ -112,6 +122,8 @@ export function JukeboxPlayer() {
     usePlayerEvents(
         {
             onCurrentSongChange: (properties) => {
+                lastSongChangeAtRef.current = Date.now();
+
                 if (applyingRemoteRef.current || !properties.song) {
                     return;
                 }
@@ -138,7 +150,12 @@ export function JukeboxPlayer() {
                     return;
                 }
 
-                debouncedSeekToTimestamp(properties.timestamp);
+                if (!playerRef.current?.isReady()) {
+                    logger.info('Jukebox event ignored: engine not ready', { kind: 'seek' });
+                    return;
+                }
+
+                debouncedSeekToTimestamp(properties.timestamp, Date.now());
             },
             onPlayerShuffle: () => {
                 playerRef.current?.queueChanged();
@@ -158,6 +175,11 @@ export function JukeboxPlayer() {
             },
             onPlayerVolume: (properties) => {
                 if (applyingRemoteRef.current) {
+                    return;
+                }
+
+                if (!playerRef.current?.isReady()) {
+                    logger.info('Jukebox event ignored: engine not ready', { kind: 'volume' });
                     return;
                 }
 

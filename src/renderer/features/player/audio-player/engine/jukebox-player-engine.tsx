@@ -30,6 +30,7 @@ import { JukeboxControlAction, JukeboxControlResponse } from '/@/shared/types/do
 import { PlayerStatus } from '/@/shared/types/types';
 
 export interface JukeboxPlayerEngineHandle extends AudioPlayer {
+    isReady(): boolean;
     queueChanged(): void;
     setMuted(muted: boolean): void;
     trackChanged(): void;
@@ -501,6 +502,9 @@ export const JukeboxPlayerEngine = (props: JukeboxPlayerEngineProps) => {
         },
         increaseVolume(by: number) {
             this.setVolume(usePlayerStoreBase.getState().player.volume + by);
+        },
+        isReady() {
+            return readyRef.current;
         },
         pause() {
             if (dropEcho('pause', !shouldSendPlayState(false, lastSeenRef.current))) {
